@@ -1,0 +1,99 @@
+-- =============================================================================
+-- Bookings ARR by Sales Team
+--
+-- Reconstructs the monthly ARR bookings by sales team report from Salesforce
+-- source data. Replaces the manual Excel-based bookings management process.
+--
+-- Sources:
+--   PROD_PROVISIONING.REVENUE_OPERATIONS_SHARE.DEALS_DATA
+--   PROD_PROVISIONING.SALESFORCE.OPPORTUNITY_SPLIT
+--   PROD_PROVISIONING.SALESFORCE.OPPORTUNITY
+--
+-- Method:
+--   Distributes each deal's ARR across teams using the Commissionable ARR
+--   split percentages from OPPORTUNITY_SPLIT. Converts non-USD currencies
+--   using monthly FX rates. Excludes rate reductions, negative adjustment
+--   deals, and internal/admin teams.
+--
+-- Validated: Jan-Aug 2026 vs FINANCE_TEAM.ARR_BOOKINGS
+--   104/134 team-months within +/-1%
+--   5 teams perfect (8/8): Manufacturing, Retailer-Mid, SS-Analytics Europe,
+--     Australia, SS-Analytics E&S
+--   6 teams at 7/8: 1Screen, Asia, Retailer-Enterprise, SS-Analytics Mid,
+--     SS-Emerging, SS-Enterprise
+-- =============================================================================
+
+WITH
+
+-- Monthly FX rates (local-currency-per-USD; divide local by rate to get USD).
+-- In production, replace with a reference table refreshed when new rates publish.
+fx(currency, mon, rate) AS (
+    SELECT * FROM VALUES
+        ('AUD', '01', 1.4358), ('AUD', '02', 1.4056), ('AUD', '03', 1.4056),
+        ('AUD', '04', 1.3888), ('AUD', '05', 1.3888), ('AUD', '06', 1.3888),
+        ('AUD', '07', 1.3888), ('AUD', '08', 1.3900),
+        ('CAD', '01', 1.3609), ('CAD', '02', 1.3642), ('CAD', '03', 1.3642),
+        ('CAD', '04', 1.3586), ('CAD', '05', 1.3586), ('CAD', '07', 1.3586),
+        ('CAD', '08', 1.3600),
+        ('EUR', '01', 1.1854), ('EUR', '02', 1.1816), ('EUR', '03', 1.1557),
+        ('EUR', '04', 1.1735), ('EUR', '05', 1.1660), ('EUR', '06', 1.1422),
+        ('EUR', '07', 1.1533), ('EUR', '08', 1.1600)
+    AS t(currency, mon, rate)
+),
+
+-- Team name mapping: Salesforce internal names -> finance report names
+nm(src, tgt) AS (
+    SELECT * FROM VALUES
+        ('Community Team',       'Community'),
+        ('APAC - Australia',     'Australia'),
+        ('APAC - Asia',          'Asia'),
+        ('Retail - Enterprise',  'Retailer - Enterprise'),
+        ('Retail - Mid Market',  'Retailer - Mid Market'),
+        ('SS - Analytics Ent',   'SS - Analytics Enterprise'),
+        ('SS - Analytics Mid',   'SS - Analytics Mid Market')
+    AS t(src, tgt)
+)
+
+SELECT
+    COALESCE(nm.tgt, os.EMPLOYEE_REPORTING_GROUP)   AS sales_team,
+    d.MONTH_CLOSED,
+    SUM(
+        (CASE
+            WHEN d.CURRENCY_CODE IN ('AUD', 'CAD', 'EUR')
+            THEN d.BOOKINGS_ANNUALIZED_RECURRING_REVENUE / f.rate
+            ELSE d.BOOKINGS_ANNUALIZED_RECURRING_REVENUE
+        END)
+        * os.SPLIT_PERCENTAGE / 100
+    )                                                AS arr_usd
+FROM PROD_PROVISIONING.REVENUE_OPERATIONS_SHARE.DEALS_DATA d
+
+JOIN PROD_PROVISIONING.SALESFORCE.OPPORTUNITY_SPLIT os
+    ON  os.OPPORTUNITY_ID = d.OPP_ID
+    AND os.OPPORTUNITY_SPLIT_TYPE = 'Commissionable ARR'
+
+JOIN PROD_PROVISIONING.SALESFORCE.OPPORTUNITY o
+    ON o.OPPORTUNITY_ID = d.OPP_ID
+
+LEFT JOIN fx f
+    ON  f.currency = d.CURRENCY_CODE
+    AND f.mon = SUBSTR(d.MONTH_CLOSED, 6, 2)
+
+LEFT JOIN nm
+    ON nm.src = os.EMPLOYEE_REPORTING_GROUP
+
+WHERE d.DEAL_STAGE = 'Closed Won'
+    AND d.MONTH_CLOSED >= '2026-01'
+    AND COALESCE(o.OPPORTUNITY_TYPE, '') <> 'Rate Reduction'
+    AND COALESCE(d.BOOKING, '') <> 'Other'
+    AND NOT (COALESCE(d.BOOKING, '') = ''
+             AND d.BOOKINGS_ANNUALIZED_RECURRING_REVENUE < 0)
+    AND os.EMPLOYEE_REPORTING_GROUP NOT IN
+        ('Do Not Report', 'System Admin', 'Customer Success', 'Revenue Recovery')
+
+GROUP BY
+    COALESCE(nm.tgt, os.EMPLOYEE_REPORTING_GROUP),
+    d.MONTH_CLOSED
+
+ORDER BY
+    d.MONTH_CLOSED,
+    arr_usd DESC;
