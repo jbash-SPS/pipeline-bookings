@@ -5,9 +5,10 @@
 -- source data. Replaces the manual Excel-based bookings management process.
 --
 -- Sources:
---   PROD_PROVISIONING.REVENUE_OPERATIONS_SHARE.DEALS_DATA
+--   PROD_PROVISIONING.FINANCE_SHARE.DEALS_DATA
 --   PROD_PROVISIONING.SALESFORCE.OPPORTUNITY_SPLIT
 --   PROD_PROVISIONING.SALESFORCE.OPPORTUNITY
+--   PROD_PROVISIONING.BUSINESS_CENTRAL.CURRENCY_EXCHANGE_RATE
 --
 -- Method:
 --   Distributes each deal's ARR across teams using the Commissionable ARR
@@ -25,20 +26,13 @@
 
 WITH
 
--- Monthly FX rates (local-currency-per-USD; divide local by rate to get USD).
--- In production, replace with a reference table refreshed when new rates publish.
-fx(currency, mon, rate) AS (
-    SELECT * FROM VALUES
-        ('AUD', '01', 1.4358), ('AUD', '02', 1.4056), ('AUD', '03', 1.4056),
-        ('AUD', '04', 1.3888), ('AUD', '05', 1.3888), ('AUD', '06', 1.3888),
-        ('AUD', '07', 1.3888), ('AUD', '08', 1.3900),
-        ('CAD', '01', 1.3609), ('CAD', '02', 1.3642), ('CAD', '03', 1.3642),
-        ('CAD', '04', 1.3586), ('CAD', '05', 1.3586), ('CAD', '07', 1.3586),
-        ('CAD', '08', 1.3600),
-        ('EUR', '01', 1.1854), ('EUR', '02', 1.1816), ('EUR', '03', 1.1557),
-        ('EUR', '04', 1.1735), ('EUR', '05', 1.1660), ('EUR', '06', 1.1422),
-        ('EUR', '07', 1.1533), ('EUR', '08', 1.1600)
-    AS t(currency, mon, rate)
+-- Monthly FX rates from Business Central (1/EXCHANGE_RATE = local-currency-per-USD).
+fx AS (
+    SELECT
+        CURRENCY_CODE AS currency,
+        TO_CHAR(STARTING_DATE, 'YYYY-MM') AS month_key,
+        1 / EXCHANGE_RATE AS rate
+    FROM PROD_PROVISIONING.BUSINESS_CENTRAL.CURRENCY_EXCHANGE_RATE
 ),
 
 -- Team name mapping: Salesforce internal names -> finance report names
@@ -76,7 +70,7 @@ JOIN PROD_PROVISIONING.SALESFORCE.OPPORTUNITY o
 
 LEFT JOIN fx f
     ON  f.currency = d.CURRENCY_CODE
-    AND f.mon = SUBSTR(d.MONTH_CLOSED, 6, 2)
+    AND f.month_key = d.MONTH_CLOSED
 
 LEFT JOIN nm
     ON nm.src = os.EMPLOYEE_REPORTING_GROUP

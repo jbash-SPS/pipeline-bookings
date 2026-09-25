@@ -1,0 +1,7 @@
+definition_version: 2
+streamlit:
+  name: bookings_forecast
+  stage: streamlit_stage
+  main_file: streamlit_app.py
+  query_warehouse: FINANCE_WH
+  title: Bookings Forecast
